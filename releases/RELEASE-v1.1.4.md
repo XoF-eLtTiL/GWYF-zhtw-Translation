@@ -18,13 +18,7 @@
 - 同時修正 `fontSharedMaterial` 與 `fontSharedMaterials`
 - Replacer 仍只處理 `ItemNameText`
 - Outline-only 修正不再強制 `ForceMeshUpdate`
-
-不包含：
-
-- 私人的加入方法
-- 私人的伺服器列表 / Lobby 工具
-- 私人的 moderation / 管理功能
-- 其他私人插件
+- BepInEx Console 視窗預設關閉
 
 安裝方式：
 
