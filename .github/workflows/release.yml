@@ -20,6 +20,11 @@ jobs:
           test -f "releases/GWYF-zhtw-Translation-Pack-${GITHUB_REF_NAME}.zip"
           test -f "releases/RELEASE-${GITHUB_REF_NAME}.md"
 
+      - name: Verify automatic translation is disabled
+        shell: pwsh
+        run: |
+          ./scripts/Verify-ReleasePackage.ps1 -PackagePath "releases/GWYF-zhtw-Translation-Pack-${GITHUB_REF_NAME}.zip"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:

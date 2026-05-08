@@ -22,6 +22,7 @@
 - `manifest.txt`：給自動更新模組比對版本與檔案雜湊用
 - `scripts/Update-Manifest.ps1`：每次修改翻譯後重建 manifest
 - `updater/`：BepInEx 自動更新翻譯模組原始碼
+- `GWYFTmpPatcher/`：修正遊戲 TMP 材質描線，並補處理 XUnity 漏掉的指定 TMP 文字
 - `releases/`：公開版模組包與 release 說明
 
 ## 這是什麼
@@ -47,7 +48,13 @@
 .\scripts\Update-Manifest.ps1
 ```
 
-3. 提交並推送
+3. 發布前確認公開包已關閉自動翻譯：
+
+```powershell
+.\scripts\Verify-ReleasePackage.ps1 -PackagePath .\releases\GWYF-zhtw-Translation-Pack-vX.Y.Z.zip
+```
+
+4. 提交並推送
 
 ## Raw 路徑
 
@@ -55,7 +62,6 @@
   - `https://raw.githubusercontent.com/XoF-eLtTiL/GWYF-zhtw-Translation/main/manifest.txt`
 - Translation base:
   - `https://raw.githubusercontent.com/XoF-eLtTiL/GWYF-zhtw-Translation/main/translations`
-
 ## 遊戲端 updater
 
 遊戲端 updater 會在 `Gamble With Your Friends` 啟動時自動檢查這個 repo 的：

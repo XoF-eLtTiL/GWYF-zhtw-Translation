@@ -1,2 +1,1 @@
-﻿blackjack=二十一點
-wheel of fortune=幸運輪盤
+﻿
