@@ -17,17 +17,17 @@ jobs:
 
       - name: Verify assets
         run: |
-          test -f "releases/GWYF-zhtw-Translation-Pack-${GITHUB_REF_NAME}.zip"
+          test -f "releases/GWYF-zhtw-Translation-Pack.zip"
           test -f "releases/RELEASE-${GITHUB_REF_NAME}.md"
 
       - name: Verify automatic translation is disabled
         shell: pwsh
         run: |
-          ./scripts/Verify-ReleasePackage.ps1 -PackagePath "releases/GWYF-zhtw-Translation-Pack-${GITHUB_REF_NAME}.zip"
+          ./scripts/Verify-ReleasePackage.ps1 -PackagePath "releases/GWYF-zhtw-Translation-Pack.zip"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           body_path: releases/RELEASE-${{ github.ref_name }}.md
           files: |
-            releases/GWYF-zhtw-Translation-Pack-${{ github.ref_name }}.zip
+            releases/GWYF-zhtw-Translation-Pack.zip

@@ -13,7 +13,7 @@ using UnityEngine.UI;
 
 namespace GWYFTmpPatcher;
 
-[BepInPlugin("codex.gwyf.tmppatcher", "GWYF TMP Patcher", "0.1.6")]
+[BepInPlugin("codex.gwyf.tmppatcher", "GWYF TMP Patcher", "0.1.8")]
 public sealed class TmpPatcherPlugin : BaseUnityPlugin
 {
     private ConfigEntry<bool> _enabled = null!;
@@ -52,14 +52,14 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
     private void Awake()
     {
         _enabled = Config.Bind("General", "Enabled", true, "Enable TMP patching.");
-        _scanIntervalSeconds = Config.Bind("General", "ScanIntervalSeconds", 0.05f, "How often to scan text objects.");
-        _patchOnlyUi = Config.Bind("General", "PatchOnlyUi", false, "Only patch UI text under Canvas/TextMeshProUGUI.");
+        _scanIntervalSeconds = Config.Bind("General", "ScanIntervalSeconds", 2f, "How often to run a lightweight path-based fallback scan.");
+        _patchOnlyUi = Config.Bind("General", "PatchOnlyUi", true, "Only patch UI text under Canvas/TextMeshProUGUI.");
         _fixTmpOutline = Config.Bind("Outline", "FixTmpOutline", true, "Fix overly thick outlines on original TMP materials.");
         _onlyPatchCjkText = Config.Bind("Outline", "OnlyPatchCjkText", false, "Only adjust outline materials on TMP text that contains CJK characters.");
         _outlineTargetPaths = Config.Bind(
             "Outline",
             "OutlineTargetPaths",
-            string.Empty,
+            "/LocalManager/UI/InteractionUIPanel/TextPanel/ItemNameText",
             "Only apply TMP font/outline repair to these hierarchy paths. Separate multiple paths with |, comma, semicolon, or new lines. Empty means all UI text.");
         _outlineWidth = Config.Bind("Outline", "OutlineWidth", 0.06f, "Forced TMP outline width. Use -1 to keep original width.");
         _outlineAlpha = Config.Bind("Outline", "OutlineAlpha", 1f, "Outline alpha when OutlineWidth is applied.");
@@ -80,12 +80,14 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         ReloadTranslationsIfNeeded(force: true);
 
         SceneManager.sceneLoaded += OnSceneLoaded;
-        PatchLoadedObjects("startup");
+        TMPro_EventManager.TEXT_CHANGED_EVENT.Add(OnTextChanged);
+        PatchConfiguredTargetObjects("startup");
     }
 
     private void OnDestroy()
     {
         SceneManager.sceneLoaded -= OnSceneLoaded;
+        TMPro_EventManager.TEXT_CHANGED_EVENT.Remove(OnTextChanged);
     }
 
     private void Update()
@@ -97,7 +99,23 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
 
         _nextScanAt = Time.unscaledTime + Mathf.Max(0.02f, _scanIntervalSeconds.Value);
         ReloadTranslationsIfNeeded(force: false);
-        PatchLoadedObjects("poll");
+        PatchConfiguredTargetObjects("poll");
+    }
+
+    private void OnTextChanged(UnityEngine.Object changedObject)
+    {
+        if (!_enabled.Value || changedObject is not TMP_Text text || text == null || IsEditorOrAssetObject(text))
+        {
+            return;
+        }
+
+        ReloadTranslationsIfNeeded(force: false);
+        bool changed = PatchTmpText(text, "text-changed", out _, out _);
+        if (changed && _forceMeshUpdate.Value)
+        {
+            text.SetAllDirty();
+            text.ForceMeshUpdate(ignoreActiveState: true, forceTextReparsing: true);
+        }
     }
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
@@ -108,39 +126,25 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         }
 
         ReloadTranslationsIfNeeded(force: false);
-        PatchLoadedObjects($"scene:{scene.name}");
+        PatchConfiguredTargetObjects($"scene:{scene.name}");
     }
 
-    private void PatchLoadedObjects(string reason)
+    private void PatchConfiguredTargetObjects(string reason)
     {
+        HashSet<int> seen = new HashSet<int>();
         int outlined = 0;
         int translated = 0;
 
-        foreach (TMP_Text text in Resources.FindObjectsOfTypeAll<TMP_Text>())
+        foreach (TMP_Text text in FindConfiguredTmpTargets())
         {
-            if (text == null || IsEditorOrAssetObject(text))
+            if (text == null || IsEditorOrAssetObject(text) || !seen.Add(text.GetInstanceID()))
             {
                 continue;
             }
 
-            bool changed = false;
-            if (_translateTmpText.Value && ShouldPatchTextComponent(text) && ShouldTranslateComponent(text) &&
-                TryTranslateText(text, text.text, value => text.text = value, reason, "TMP"))
-            {
-                changed = true;
-                translated++;
-            }
-
-            if (_fixTmpOutline.Value && text.fontSharedMaterial != null && ShouldPatchOutline(text))
-            {
-                Material material = GetOutlineAdjustedMaterial(text.fontSharedMaterial);
-                if (!ReferenceEquals(text.fontSharedMaterial, material))
-                {
-                    text.fontSharedMaterial = material;
-                    changed = true;
-                    outlined++;
-                }
-            }
+            bool changed = PatchTmpText(text, reason, out bool outlineChanged, out bool textTranslated);
+            outlined += outlineChanged ? 1 : 0;
+            translated += textTranslated ? 1 : 0;
 
             if (changed && _forceMeshUpdate.Value)
             {
@@ -149,6 +153,7 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
             }
         }
 
+        // Legacy UI/TextMesh support is intentionally kept off the hot path unless explicitly enabled.
         if (_translateUnityUiText.Value)
         {
             foreach (Text text in Resources.FindObjectsOfTypeAll<Text>())
@@ -176,6 +181,87 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         if (_logChanges.Value && (outlined > 0 || translated > 0))
         {
             Logger.LogInfo($"TMP patch complete ({reason}). Outline={outlined}, translated={translated}.");
+        }
+    }
+
+    private bool PatchTmpText(TMP_Text text, string reason, out bool outlineChanged, out bool textTranslated)
+    {
+        outlineChanged = false;
+        textTranslated = false;
+
+        bool changed = false;
+        if (_translateTmpText.Value && ShouldPatchTextComponent(text) && ShouldTranslateComponent(text) &&
+            TryTranslateText(text, text.text, value => text.text = value, reason, "TMP"))
+        {
+            changed = true;
+            textTranslated = true;
+        }
+
+        if (_fixTmpOutline.Value && text.fontSharedMaterial != null && ShouldPatchOutline(text))
+        {
+            Material material = GetOutlineAdjustedMaterial(text.fontSharedMaterial);
+            if (!ReferenceEquals(text.fontSharedMaterial, material))
+            {
+                text.fontSharedMaterial = material;
+                changed = true;
+                outlineChanged = true;
+            }
+        }
+
+        return changed;
+    }
+
+    private IEnumerable<TMP_Text> FindConfiguredTmpTargets()
+    {
+        HashSet<string> targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddTargets(targets, _outlineTargetPaths.Value);
+        AddTargets(targets, _translationTargetPaths.Value);
+
+        if (targets.Count == 0)
+        {
+            return Resources.FindObjectsOfTypeAll<TMP_Text>()
+                .Where(text => text != null && !IsEditorOrAssetObject(text));
+        }
+
+        List<TMP_Text> results = new List<TMP_Text>();
+        foreach (string target in targets)
+        {
+            foreach (string candidate in GetFindPathCandidates(target))
+            {
+                GameObject? gameObject = GameObject.Find(candidate);
+                if (gameObject == null)
+                {
+                    continue;
+                }
+
+                results.AddRange(gameObject.GetComponentsInChildren<TMP_Text>(includeInactive: true));
+                break;
+            }
+        }
+
+        return results;
+    }
+
+    private static void AddTargets(HashSet<string> targets, string value)
+    {
+        foreach (string target in SplitTargets(value))
+        {
+            targets.Add(target);
+        }
+    }
+
+    private static IEnumerable<string> GetFindPathCandidates(string target)
+    {
+        string raw = target.Replace('\\', '/').Trim().Trim('/');
+        if (raw.Length > 0)
+        {
+            yield return raw;
+        }
+
+        string normalized = NormalizeHierarchyPath(target).Trim('/');
+        if (normalized.Length > 0 && !string.Equals(normalized, raw, StringComparison.Ordinal))
+        {
+            yield return normalized;
         }
     }
 
