@@ -1,12 +1,11 @@
 # GWYF zh-TW Translation
 
-這個倉庫是 `Gamble With Your Friends` 的繁體中文翻譯與配套更新模組倉庫。
+這個倉庫是 `Gamble With Your Friends` 的繁體中文翻譯倉庫。
 
 用途：
 
 - 提供這款遊戲的 `zh-TW` 翻譯文本
 - 提供翻譯貼圖資源
-- 提供自動更新翻譯文件的 BepInEx 模組原始碼
 - 提供公開版 release 安裝包
 
 不包含：
@@ -20,9 +19,8 @@
 
 - `translations/zh-TW/...`：`Gamble With Your Friends` 實際使用的繁體中文翻譯文字與貼圖
 - `manifest.txt`：給自動更新模組比對版本與檔案雜湊用
-- `scripts/Update-Manifest.ps1`：每次修改翻譯後重建 manifest
 - `updater/`：BepInEx 自動更新翻譯模組原始碼
-- `GWYFTmpPatcher/`：修正遊戲 TMP 材質描線，並補處理 XUnity 漏掉的指定 TMP 文字
+- `GWYFTmpPatcher/`：處理 TMP 字體替換、指定 TMP 文字修復，以及內嵌 Logo 貼圖替換
 - `releases/`：公開版模組包與 release 說明
 
 ## 這是什麼
@@ -37,24 +35,7 @@
 
 - 直接修改翻譯文本
 - 更新翻譯貼圖
-- 重建 manifest 後發布新版
-
-## 更新翻譯
-
-1. 修改 `translations/` 內檔案
-2. 執行：
-
-```powershell
-.\scripts\Update-Manifest.ps1
-```
-
-3. 發布前確認公開包已關閉自動翻譯：
-
-```powershell
-.\scripts\Verify-ReleasePackage.ps1 -PackagePath .\releases\GWYF-zhtw-Translation-Pack-vX.Y.Z.zip
-```
-
-4. 提交並推送
+- 送出翻譯修正
 
 ## Raw 路徑
 
@@ -71,12 +52,13 @@
 
 並下載有變更的翻譯文件。
 
-預設 raw URL 已經寫在：
+raw URL 已經寫死在：
 
 - `updater/TranslationUpdaterPlugin.cs`
 
-也可以在遊戲生成的：
+為了避免 updater 被濫用覆蓋插件或執行惡意代碼，遊戲端 config 不提供更改遠端來源。updater 只接受：
 
-- `BepInEx/config/codex.gwyf.translationupdater.cfg`
+- `zh-TW/Text/*.txt`
+- `zh-TW/Texture/*.png`
 
-手動改成別的分支或 fork。
+所有下載內容只會寫入 `BepInEx/Translation`，不會被載入或執行。

@@ -1,6 +1,6 @@
 # GWYF Translation Updater
 
-This BepInEx plugin syncs `BepInEx/Translation` files from the raw GitHub translation repository for `GWYF-zhtw-Translation`.
+This BepInEx plugin syncs translation data from the raw GitHub translation repository for `GWYF-zhtw-Translation`.
 
 ## Remote layout
 
@@ -8,21 +8,23 @@ This BepInEx plugin syncs `BepInEx/Translation` files from the raw GitHub transl
 - `translations/zh-TW/Text/...`
 - `translations/zh-TW/Texture/...`
 
-## Config
-
-After first launch, edit:
-
-- `BepInEx/config/codex.gwyf.translationupdater.cfg`
-
-Default remote:
+## Locked remote
 
 - `https://raw.githubusercontent.com/XoF-eLtTiL/GWYF-zhtw-Translation/main/manifest.txt`
 - `https://raw.githubusercontent.com/XoF-eLtTiL/GWYF-zhtw-Translation/main/translations`
 
-Config keys:
+The remote source is hardcoded on purpose. It cannot be changed through config.
 
-- `ManifestUrl`
-- `RawBaseUrl`
+## Safety allowlist
+
+The updater only downloads files listed in `manifest.txt` when they match all of these rules:
+
+- path starts with `zh-TW/Text/` or `zh-TW/Texture/`
+- extension is `.txt` or `.png`
+- path is relative and does not contain `..`
+- sha256 in the manifest matches the downloaded bytes
+
+Downloaded files are only written to `BepInEx/Translation`. The updater never loads or executes downloaded content.
 
 ## Manual commands
 

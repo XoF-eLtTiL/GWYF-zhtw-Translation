@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using BepInEx;
@@ -14,34 +15,40 @@ using UnityEngine.UI;
 
 namespace GWYFTmpPatcher;
 
-[BepInPlugin("codex.gwyf.tmppatcher", "GWYF TMP Patcher", "0.1.10")]
+[BepInPlugin("codex.gwyf.tmppatcher", "GWYF TMP Patcher", "0.1.12")]
 public sealed class TmpPatcherPlugin : BaseUnityPlugin
 {
+    private sealed class TextureReplacement
+    {
+        public string Name { get; set; } = string.Empty;
+        public Texture2D Texture { get; set; } = null!;
+        public HashSet<int> PatchedTextures { get; } = new HashSet<int>();
+        public Dictionary<int, Sprite> SpriteCache { get; } = new Dictionary<int, Sprite>();
+    }
+
     private ConfigEntry<bool> _enabled = null!;
-    private ConfigEntry<float> _scanIntervalSeconds = null!;
     private ConfigEntry<bool> _patchOnlyUi = null!;
-    private ConfigEntry<bool> _fixTmpOutline = null!;
-    private ConfigEntry<bool> _onlyPatchCjkText = null!;
-    private ConfigEntry<string> _outlineTargetPaths = null!;
-    private ConfigEntry<float> _outlineWidth = null!;
-    private ConfigEntry<float> _outlineAlpha = null!;
-    private ConfigEntry<float> _faceDilate = null!;
-    private ConfigEntry<bool> _forceOutlineColor = null!;
     private ConfigEntry<bool> _translateTmpText = null!;
-    private ConfigEntry<bool> _translateUnityUiText = null!;
-    private ConfigEntry<bool> _translateTextMesh = null!;
-    private ConfigEntry<string> _translationTargetPaths = null!;
     private ConfigEntry<bool> _forceMeshUpdate = null!;
     private ConfigEntry<bool> _logChanges = null!;
-    private ConfigEntry<int> _outlineBatchSize = null!;
+    private ConfigEntry<int> _fontBatchSize = null!;
+    private ConfigEntry<bool> _replaceFontWithExternalFile = null!;
+    private ConfigEntry<string> _externalFontPath = null!;
+    private ConfigEntry<string> _assetBundleFontAssetName = null!;
+    private ConfigEntry<bool> _replaceFontMaterials = null!;
+    private ConfigEntry<bool> _replaceBuiltInTextures = null!;
+    private ConfigEntry<string> _logoTextureAliases = null!;
+    private ConfigEntry<int> _textureBatchSize = null!;
 
-    private const string OutlineMaterialPrefix = "GWYF TMP Outline ";
+    private const string FontMaterialPrefix = "GWYF TMP Font ";
+    private const string ReplacerTargetPath = "/LocalManager/UI/InteractionUIPanel/TextPanel/ItemNameText";
+    private const string EmbeddedFontResourceName = "GWYFTmpPatcher.Assets.notosanstc-medium-sdf.bundle";
+    private const string EmbeddedLogoResourceName = "GWYFTmpPatcher.Assets.GWYFTW_LOGO.png";
 
-    private static readonly int FaceDilateId = Shader.PropertyToID("_FaceDilate");
-    private static readonly int OutlineWidthId = Shader.PropertyToID("_OutlineWidth");
-    private static readonly int OutlineColorId = Shader.PropertyToID("_OutlineColor");
-
-    private readonly Dictionary<int, Material> _outlineMaterials = new Dictionary<int, Material>();
+    private readonly Dictionary<int, Material> _fontReplacementMaterials = new Dictionary<int, Material>();
+    private readonly HashSet<int> _fontPatchedTextIds = new HashSet<int>();
+    private readonly List<AssetBundle> _loadedFontBundles = new List<AssetBundle>();
+    private readonly Dictionary<string, TextureReplacement> _textureReplacements = new Dictionary<string, TextureReplacement>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _exactRules = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _postRules = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private readonly List<RegexRule> _regexRules = new List<RegexRule>();
@@ -49,60 +56,59 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
     private readonly Dictionary<string, DateTime> _translationFileTimes = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
     private string _translationTextDirectory = null!;
-    private float _nextScanAt;
+    private TMP_FontAsset? _externalFontAsset;
+    private bool _embeddedFontLoadAttempted;
+    private bool _textureReplacementsLoaded;
+    private static readonly MethodInfo? LoadImageMethod = Type
+        .GetType("UnityEngine.ImageConversion, UnityEngine.ImageConversionModule")
+        ?.GetMethod("LoadImage", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(Texture2D), typeof(byte[]), typeof(bool) }, null);
 
     private void Awake()
     {
         _enabled = Config.Bind("General", "Enabled", true, "Enable TMP patching.");
-        _scanIntervalSeconds = Config.Bind("General", "ScanIntervalSeconds", 2f, "How often to run a lightweight path-based fallback scan.");
         _patchOnlyUi = Config.Bind("General", "PatchOnlyUi", true, "Only patch UI text under Canvas/TextMeshProUGUI.");
-        _fixTmpOutline = Config.Bind("Outline", "FixTmpOutline", true, "Fix overly thick outlines on original TMP materials.");
-        _onlyPatchCjkText = Config.Bind("Outline", "OnlyPatchCjkText", false, "Only adjust outline materials on TMP text that contains CJK characters.");
-        _outlineTargetPaths = Config.Bind(
-            "Outline",
-            "OutlineTargetPaths",
-            string.Empty,
-            "Only apply TMP font/outline repair to these hierarchy paths. Separate multiple paths with |, comma, semicolon, or new lines. Empty means all UI text.");
-        _outlineWidth = Config.Bind("Outline", "OutlineWidth", 0.06f, "Forced TMP outline width. Use -1 to keep original width.");
-        _outlineAlpha = Config.Bind("Outline", "OutlineAlpha", 1f, "Outline alpha when OutlineWidth is applied.");
-        _faceDilate = Config.Bind("Outline", "FaceDilate", 0f, "TMP face dilate. Negative values make glyphs slightly thinner. Use -999 to preserve original.");
-        _forceOutlineColor = Config.Bind("Outline", "ForceOutlineColor", true, "Force TMP outline color to black so the repaired outline stays visible.");
         _translateTmpText = Config.Bind("Translation", "TranslateTmpText", true, "Apply XUnity translation files to TMP_Text objects missed by XUnity hooks.");
-        _translateUnityUiText = Config.Bind("Translation", "TranslateUnityUiText", false, "Apply XUnity translation files to legacy UnityEngine.UI.Text objects.");
-        _translateTextMesh = Config.Bind("Translation", "TranslateTextMesh", false, "Apply XUnity translation files to legacy UnityEngine.TextMesh objects.");
-        _translationTargetPaths = Config.Bind(
-            "Translation",
-            "TranslationTargetPaths",
-            "/LocalManager/UI/InteractionUIPanel/TextPanel/ItemNameText",
-            "Only apply replacer translations to these hierarchy paths. Separate multiple paths with |, comma, semicolon, or new lines. Empty means all UI text.");
-        _forceMeshUpdate = Config.Bind("General", "ForceMeshUpdate", false, "Force TMP meshes to redraw after text replacement. Outline-only changes do not force mesh updates.");
-        _logChanges = Config.Bind("Diagnostics", "LogChanges", true, "Log applied outline and translation changes.");
-        _outlineBatchSize = Config.Bind("Performance", "OutlineBatchSize", 32, "How many TMP objects to outline patch per frame during scene scans.");
+        _forceMeshUpdate = Config.Bind("General", "ForceMeshUpdate", false, "Force TMP meshes to redraw after text replacement.");
+        _logChanges = Config.Bind("Diagnostics", "LogChanges", true, "Log applied font and translation changes.");
+        _fontBatchSize = Config.Bind("Performance", "FontBatchSize", 32, "How many TMP objects to font patch per frame during scene scans.");
+        _replaceFontWithExternalFile = Config.Bind("Font", "ReplaceFontWithExternalFile", true, "Replace TMP font assets with an external TMP_FontAsset AssetBundle file.");
+        _externalFontPath = Config.Bind("Font", "ExternalFontPath", "notosanstc-medium sdf", "External TMP font AssetBundle path. Relative paths are searched from the game root and BepInEx/config.");
+        _assetBundleFontAssetName = Config.Bind("Font", "AssetBundleFontAssetName", "", "TMP_FontAsset name inside the AssetBundle. Leave blank to use the first TMP_FontAsset.");
+        _replaceFontMaterials = Config.Bind("Font", "ReplaceFontMaterials", true, "Use the external font material when replacing TMP font assets.");
+        _replaceBuiltInTextures = Config.Bind("Texture", "ReplaceBuiltInTextures", true, "Replace selected game textures from resources embedded in this patcher.");
+        _logoTextureAliases = Config.Bind("Texture", "LogoTextureAliases", "tenstack_logo_grayscale_ten|tenstack_logo_grayscale_stack|GWYFTW_LOGO", "Texture or sprite names that should use the embedded zh-TW logo.");
+        _textureBatchSize = Config.Bind("Performance", "TextureBatchSize", 64, "How many texture related objects to inspect per frame during texture replacement scans.");
 
         _translationTextDirectory = Path.Combine(Paths.GameRootPath, "BepInEx", "Translation", "zh-TW", "Text");
         ReloadTranslationsIfNeeded(force: true);
+        TryLoadExternalFont();
+        LoadEmbeddedTextureReplacements();
 
         SceneManager.sceneLoaded += OnSceneLoaded;
         TMPro_EventManager.TEXT_CHANGED_EVENT.Add(OnTextChanged);
-        QueueSceneOutlineScans("startup");
+        QueueSceneFontScans("startup");
+        QueueTextureScans("startup");
     }
 
     private void OnDestroy()
     {
         SceneManager.sceneLoaded -= OnSceneLoaded;
         TMPro_EventManager.TEXT_CHANGED_EVENT.Remove(OnTextChanged);
-    }
-
-    private void Update()
-    {
-        if (!_enabled.Value || Time.unscaledTime < _nextScanAt)
+        foreach (AssetBundle bundle in _loadedFontBundles)
         {
-            return;
+            bundle.Unload(unloadAllLoadedObjects: false);
         }
 
-        _nextScanAt = Time.unscaledTime + Mathf.Max(0.02f, _scanIntervalSeconds.Value);
-        ReloadTranslationsIfNeeded(force: false);
-        PatchConfiguredTranslationTargets("poll");
+        _loadedFontBundles.Clear();
+        foreach (TextureReplacement replacement in _textureReplacements.Values.Distinct())
+        {
+            if (replacement.Texture != null)
+            {
+                Destroy(replacement.Texture);
+            }
+        }
+
+        _textureReplacements.Clear();
     }
 
     private void OnTextChanged(UnityEngine.Object changedObject)
@@ -113,7 +119,7 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         }
 
         ReloadTranslationsIfNeeded(force: false);
-        PatchTmpText(text, "text-changed", allowTranslate: true, allowOutline: true, out _, out bool textTranslated);
+        PatchTmpText(text, "text-changed", allowTranslate: true, allowFont: true, out _, out bool textTranslated);
         if (textTranslated && _forceMeshUpdate.Value)
         {
             text.SetAllDirty();
@@ -129,11 +135,17 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         }
 
         ReloadTranslationsIfNeeded(force: false);
-        QueueSceneOutlineScans($"scene:{scene.name}");
+        QueueSceneFontScans($"scene:{scene.name}");
+        QueueTextureScans($"scene:{scene.name}");
     }
 
-    private void QueueSceneOutlineScans(string reason)
+    private void QueueSceneFontScans(string reason)
     {
+        if (!_replaceFontWithExternalFile.Value)
+        {
+            return;
+        }
+
         StartCoroutine(PatchSceneTmpObjectsBatched(reason, 0f));
         StartCoroutine(PatchSceneTmpObjectsBatched(reason + ":delayed1", 1f));
         StartCoroutine(PatchSceneTmpObjectsBatched(reason + ":delayed3", 3f));
@@ -148,10 +160,10 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
 
         TMP_Text[] texts = Resources.FindObjectsOfTypeAll<TMP_Text>();
         HashSet<int> seen = new HashSet<int>();
-        int outlined = 0;
+        int fontPatched = 0;
         int translated = 0;
         int processedThisFrame = 0;
-        int batchSize = Mathf.Max(1, _outlineBatchSize.Value);
+        int batchSize = Mathf.Max(1, _fontBatchSize.Value);
 
         foreach (TMP_Text text in texts)
         {
@@ -160,8 +172,8 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
                 continue;
             }
 
-            PatchTmpText(text, reason, allowTranslate: true, allowOutline: true, out bool outlineChanged, out bool textTranslated);
-            outlined += outlineChanged ? 1 : 0;
+            PatchTmpText(text, reason, allowTranslate: false, allowFont: true, out bool fontChanged, out bool textTranslated);
+            fontPatched += fontChanged ? 1 : 0;
             translated += textTranslated ? 1 : 0;
 
             if (textTranslated && _forceMeshUpdate.Value)
@@ -178,82 +190,122 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
             }
         }
 
-        LogPatchSummary(reason, outlined, translated);
+        LogPatchSummary(reason, fontPatched, translated);
     }
 
-    private void PatchConfiguredTranslationTargets(string reason)
+    private void QueueTextureScans(string reason)
     {
-        HashSet<int> seen = new HashSet<int>();
-        int translated = 0;
-
-        foreach (TMP_Text text in FindConfiguredTmpTargets(_translationTargetPaths.Value))
+        if (!_replaceBuiltInTextures.Value)
         {
-            if (text == null || IsEditorOrAssetObject(text) || !seen.Add(text.GetInstanceID()))
-            {
-                continue;
-            }
-
-            PatchTmpText(text, reason, allowTranslate: true, allowOutline: false, out _, out bool textTranslated);
-            translated += textTranslated ? 1 : 0;
-
-            if (textTranslated && _forceMeshUpdate.Value)
-            {
-                text.SetAllDirty();
-                text.ForceMeshUpdate(ignoreActiveState: true, forceTextReparsing: true);
-            }
+            return;
         }
 
-        // Legacy UI/TextMesh support is intentionally kept off the hot path unless explicitly enabled.
-        if (_translateUnityUiText.Value)
-        {
-            foreach (Text text in Resources.FindObjectsOfTypeAll<Text>())
-            {
-                if (text != null && !IsEditorOrAssetObject(text) && ShouldPatchTextComponent(text) && ShouldTranslateComponent(text) &&
-                    TryTranslateText(text, text.text, value => text.text = value, reason, "UI.Text"))
-                {
-                    translated++;
-                    if (_forceMeshUpdate.Value)
-                    {
-                        text.SetAllDirty();
-                    }
-                }
-            }
-        }
-
-        if (_translateTextMesh.Value)
-        {
-            foreach (TextMesh text in Resources.FindObjectsOfTypeAll<TextMesh>())
-            {
-                if (text != null && !IsEditorOrAssetObject(text) && ShouldPatchTextComponent(text) && ShouldTranslateComponent(text) &&
-                    TryTranslateText(text, text.text, value => text.text = value, reason, "TextMesh"))
-                {
-                    translated++;
-                }
-            }
-        }
-
-        LogPatchSummary(reason, outlined: 0, translated);
+        StartCoroutine(PatchSceneTexturesBatched(reason, 0f));
+        StartCoroutine(PatchSceneTexturesBatched(reason + ":delayed1", 1f));
+        StartCoroutine(PatchSceneTexturesBatched(reason + ":delayed3", 3f));
     }
 
-    private bool PatchTmpText(TMP_Text text, string reason, bool allowTranslate, bool allowOutline, out bool outlineChanged, out bool textTranslated)
+    private IEnumerator PatchSceneTexturesBatched(string reason, float delaySeconds)
     {
-        outlineChanged = false;
+        if (delaySeconds > 0f)
+        {
+            yield return new WaitForSecondsRealtime(delaySeconds);
+        }
+
+        if (!LoadEmbeddedTextureReplacements())
+        {
+            yield break;
+        }
+
+        int textures = 0;
+        int images = 0;
+        int spriteRenderers = 0;
+        int materials = 0;
+        int processedThisFrame = 0;
+        int batchSize = Mathf.Max(1, _textureBatchSize.Value);
+
+        foreach (Texture2D texture in Resources.FindObjectsOfTypeAll<Texture2D>())
+        {
+            if (texture != null && PatchLoadedTextureObject(texture))
+            {
+                textures++;
+            }
+
+            if (++processedThisFrame >= batchSize)
+            {
+                processedThisFrame = 0;
+                yield return null;
+            }
+        }
+
+        foreach (Image image in Resources.FindObjectsOfTypeAll<Image>())
+        {
+            if (image != null && image.sprite != null && PatchImage(image))
+            {
+                images++;
+            }
+
+            if (++processedThisFrame >= batchSize)
+            {
+                processedThisFrame = 0;
+                yield return null;
+            }
+        }
+
+        foreach (SpriteRenderer renderer in Resources.FindObjectsOfTypeAll<SpriteRenderer>())
+        {
+            if (renderer != null && renderer.sprite != null && PatchSpriteRenderer(renderer))
+            {
+                spriteRenderers++;
+            }
+
+            if (++processedThisFrame >= batchSize)
+            {
+                processedThisFrame = 0;
+                yield return null;
+            }
+        }
+
+        foreach (Renderer renderer in Resources.FindObjectsOfTypeAll<Renderer>())
+        {
+            if (renderer != null)
+            {
+                materials += PatchRendererMaterials(renderer);
+            }
+
+            if (++processedThisFrame >= batchSize)
+            {
+                processedThisFrame = 0;
+                yield return null;
+            }
+        }
+
+        if (_logChanges.Value && (textures > 0 || images > 0 || spriteRenderers > 0 || materials > 0))
+        {
+            Logger.LogInfo($"Texture patch complete ({reason}). Textures={textures}, images={images}, spriteRenderers={spriteRenderers}, materials={materials}.");
+        }
+    }
+
+    private bool PatchTmpText(TMP_Text text, string reason, bool allowTranslate, bool allowFont, out bool fontChanged, out bool textTranslated)
+    {
+        fontChanged = false;
         textTranslated = false;
 
         bool changed = false;
-        if (allowTranslate && _translateTmpText.Value && ShouldPatchTextComponent(text) && ShouldTranslateComponent(text) &&
+        if (allowTranslate && _translateTmpText.Value && ShouldPatchTextComponent(text) && IsReplacerTarget(text) &&
             TryTranslateText(text, text.text, value => text.text = value, reason, "TMP"))
         {
             changed = true;
             textTranslated = true;
         }
 
-        if (allowOutline && _fixTmpOutline.Value && ShouldPatchOutline(text))
+        if (allowFont && _replaceFontWithExternalFile.Value)
         {
+            TryLoadExternalFont();
             if (PatchTextMaterials(text))
             {
                 changed = true;
-                outlineChanged = true;
+                fontChanged = true;
             }
         }
 
@@ -262,11 +314,30 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
 
     private bool PatchTextMaterials(TMP_Text text)
     {
+        bool replaceFont = _replaceFontWithExternalFile.Value && _externalFontAsset != null;
+        if (!replaceFont)
+        {
+            return false;
+        }
+
+        int textId = text.GetInstanceID();
+        if (_fontPatchedTextIds.Contains(textId) && ReferenceEquals(text.font, _externalFontAsset))
+        {
+            return false;
+        }
+
         bool changed = false;
+        if (!ReferenceEquals(text.font, _externalFontAsset))
+        {
+            text.font = _externalFontAsset;
+            changed = true;
+        }
 
         if (text.fontSharedMaterial != null)
         {
-            Material material = GetOutlineAdjustedMaterial(text.fontSharedMaterial);
+            Material material = replaceFont && _replaceFontMaterials.Value
+                ? GetExternalFontMaterial(text.fontSharedMaterial)
+                : text.fontSharedMaterial;
             if (!ReferenceEquals(text.fontSharedMaterial, material))
             {
                 text.fontSharedMaterial = material;
@@ -286,7 +357,9 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
                     continue;
                 }
 
-                Material patched = GetOutlineAdjustedMaterial(original);
+                Material patched = replaceFont && _replaceFontMaterials.Value
+                    ? GetExternalFontMaterial(original)
+                    : original;
                 if (!ReferenceEquals(original, patched))
                 {
                     sharedMaterials[i] = patched;
@@ -301,146 +374,407 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
             }
         }
 
+        if (changed)
+        {
+            _fontPatchedTextIds.Add(textId);
+        }
+
         return changed;
     }
 
-    private void LogPatchSummary(string reason, int outlined, int translated)
+    private void LogPatchSummary(string reason, int fontPatched, int translated)
     {
-        if (_logChanges.Value && (outlined > 0 || translated > 0))
+        if (_logChanges.Value && (fontPatched > 0 || translated > 0))
         {
-            Logger.LogInfo($"TMP patch complete ({reason}). Outline={outlined}, translated={translated}.");
+            Logger.LogInfo($"TMP patch complete ({reason}). Fonts={fontPatched}, translated={translated}.");
         }
     }
 
-    private IEnumerable<TMP_Text> FindConfiguredTmpTargets(string targetPaths)
+    private bool LoadEmbeddedTextureReplacements()
     {
-        HashSet<string> targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        AddTargets(targets, targetPaths);
-
-        if (targets.Count == 0)
+        if (_textureReplacementsLoaded)
         {
-            return Resources.FindObjectsOfTypeAll<TMP_Text>()
-                .Where(text => text != null && !IsEditorOrAssetObject(text));
+            return _textureReplacements.Count > 0;
         }
 
-        List<TMP_Text> results = new List<TMP_Text>();
-        foreach (string target in targets)
-        {
-            foreach (string candidate in GetFindPathCandidates(target))
-            {
-                GameObject? gameObject = GameObject.Find(candidate);
-                if (gameObject == null)
-                {
-                    continue;
-                }
-
-                results.AddRange(gameObject.GetComponentsInChildren<TMP_Text>(includeInactive: true));
-                break;
-            }
-        }
-
-        return results;
-    }
-
-    private static void AddTargets(HashSet<string> targets, string value)
-    {
-        foreach (string target in SplitTargets(value))
-        {
-            targets.Add(target);
-        }
-    }
-
-    private static IEnumerable<string> GetFindPathCandidates(string target)
-    {
-        string raw = target.Replace('\\', '/').Trim().Trim('/');
-        if (raw.Length > 0)
-        {
-            yield return raw;
-        }
-
-        string normalized = NormalizeHierarchyPath(target).Trim('/');
-        if (normalized.Length > 0 && !string.Equals(normalized, raw, StringComparison.Ordinal))
-        {
-            yield return normalized;
-        }
-    }
-
-    private Material GetOutlineAdjustedMaterial(Material originalMaterial)
-    {
-        if (originalMaterial.name.StartsWith(OutlineMaterialPrefix, StringComparison.Ordinal))
-        {
-            ApplyOutlinePolicy(originalMaterial);
-            return originalMaterial;
-        }
-
-        int key = originalMaterial.GetInstanceID();
-        if (_outlineMaterials.TryGetValue(key, out Material cachedMaterial))
-        {
-            ApplyOutlinePolicy(cachedMaterial);
-            return cachedMaterial;
-        }
-
-        Material material = new Material(originalMaterial)
-        {
-            name = $"{OutlineMaterialPrefix}{originalMaterial.name}"
-        };
-        ApplyOutlinePolicy(material);
-        _outlineMaterials[key] = material;
-        return material;
-    }
-
-    private void ApplyOutlinePolicy(Material material)
-    {
-        if (material.HasProperty(FaceDilateId) && _faceDilate.Value > -999f)
-        {
-            material.SetFloat(FaceDilateId, Mathf.Clamp(_faceDilate.Value, -1f, 1f));
-        }
-
-        if (!material.HasProperty(OutlineWidthId))
-        {
-            return;
-        }
-
-        float width = _outlineWidth.Value;
-        if (width >= 0f)
-        {
-            material.SetFloat(OutlineWidthId, Mathf.Clamp01(width));
-            material.EnableKeyword("OUTLINE_ON");
-
-            if (material.HasProperty(OutlineColorId))
-            {
-                Color color = _forceOutlineColor.Value ? Color.black : material.GetColor(OutlineColorId);
-                color.a = Mathf.Clamp01(_outlineAlpha.Value);
-                material.SetColor(OutlineColorId, color);
-            }
-        }
-    }
-
-    private bool ShouldPatchOutline(TMP_Text text)
-    {
-        if (_onlyPatchCjkText.Value && !ContainsCjk(text.text))
+        _textureReplacementsLoaded = true;
+        if (!_replaceBuiltInTextures.Value)
         {
             return false;
         }
 
-        string targets = _outlineTargetPaths.Value;
-        if (string.IsNullOrWhiteSpace(targets))
+        byte[]? logoBytes = ReadEmbeddedResourceBytes(EmbeddedLogoResourceName);
+        if (logoBytes == null || logoBytes.Length == 0)
         {
-            return true;
+            Logger.LogWarning("Embedded logo PNG was not found in patcher resources.");
+            return false;
         }
 
-        return MatchesAnyTargetPath(text.transform, targets);
+        Texture2D logo = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
+        if (!TryLoadPng(logo, logoBytes))
+        {
+            Destroy(logo);
+            Logger.LogWarning("Embedded logo PNG could not be decoded.");
+            return false;
+        }
+
+        logo.name = "GWYFTW_LOGO";
+        logo.wrapMode = TextureWrapMode.Clamp;
+        logo.filterMode = FilterMode.Bilinear;
+
+        TextureReplacement replacement = new TextureReplacement
+        {
+            Name = "GWYFTW_LOGO",
+            Texture = logo
+        };
+
+        foreach (string alias in SplitAliases(_logoTextureAliases.Value))
+        {
+            _textureReplacements[alias] = replacement;
+        }
+
+        if (_logChanges.Value)
+        {
+            Logger.LogInfo($"Loaded embedded texture replacements: {_textureReplacements.Count} aliases, logo={logo.width}x{logo.height}");
+        }
+
+        return _textureReplacements.Count > 0;
     }
 
-    private bool ShouldTranslateComponent(Component component)
+    private bool PatchLoadedTextureObject(Texture2D texture)
     {
-        string targets = _translationTargetPaths.Value;
-        if (string.IsNullOrWhiteSpace(targets))
+        if (!_textureReplacements.TryGetValue(texture.name, out TextureReplacement replacement))
         {
-            return true;
+            return false;
         }
 
-        return MatchesAnyTargetPath(component.transform, targets);
+        int instanceId = texture.GetInstanceID();
+        if (replacement.PatchedTextures.Contains(instanceId) ||
+            ReferenceEquals(texture, replacement.Texture) ||
+            texture.width != replacement.Texture.width ||
+            texture.height != replacement.Texture.height)
+        {
+            return false;
+        }
+
+        try
+        {
+            Graphics.CopyTexture(replacement.Texture, texture);
+            replacement.PatchedTextures.Add(instanceId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            replacement.PatchedTextures.Add(instanceId);
+            Logger.LogWarning($"Could not copy replacement into Texture2D '{texture.name}'; sprite/material replacement may still work. {ex.Message}");
+            return false;
+        }
+    }
+
+    private bool PatchImage(Image image)
+    {
+        TextureReplacement? replacement = FindReplacementForSprite(image.sprite);
+        if (replacement == null)
+        {
+            return false;
+        }
+
+        Sprite sprite = GetReplacementSprite(replacement, image.sprite);
+        if (ReferenceEquals(image.sprite, sprite))
+        {
+            return false;
+        }
+
+        image.sprite = sprite;
+        image.SetAllDirty();
+        return true;
+    }
+
+    private bool PatchSpriteRenderer(SpriteRenderer renderer)
+    {
+        TextureReplacement? replacement = FindReplacementForSprite(renderer.sprite);
+        if (replacement == null)
+        {
+            return false;
+        }
+
+        Sprite sprite = GetReplacementSprite(replacement, renderer.sprite);
+        if (ReferenceEquals(renderer.sprite, sprite))
+        {
+            return false;
+        }
+
+        renderer.sprite = sprite;
+        return true;
+    }
+
+    private int PatchRendererMaterials(Renderer renderer)
+    {
+        int patched = 0;
+        foreach (Material material in renderer.sharedMaterials ?? Array.Empty<Material>())
+        {
+            if (material == null || material.mainTexture == null)
+            {
+                continue;
+            }
+
+            if (_textureReplacements.TryGetValue(material.mainTexture.name, out TextureReplacement replacement) &&
+                !ReferenceEquals(material.mainTexture, replacement.Texture))
+            {
+                material.mainTexture = replacement.Texture;
+                patched++;
+            }
+        }
+
+        return patched;
+    }
+
+    private TextureReplacement? FindReplacementForSprite(Sprite sprite)
+    {
+        if (_textureReplacements.TryGetValue(sprite.name, out TextureReplacement replacement))
+        {
+            return replacement;
+        }
+
+        Texture2D texture = sprite.texture;
+        if (texture != null && _textureReplacements.TryGetValue(texture.name, out replacement))
+        {
+            return replacement;
+        }
+
+        return null;
+    }
+
+    private static Sprite GetReplacementSprite(TextureReplacement replacement, Sprite source)
+    {
+        int sourceId = source.GetInstanceID();
+        if (replacement.SpriteCache.TryGetValue(sourceId, out Sprite cached))
+        {
+            return cached;
+        }
+
+        Rect rect = source.rect;
+        if (rect.xMax > replacement.Texture.width || rect.yMax > replacement.Texture.height)
+        {
+            rect = new Rect(0f, 0f, replacement.Texture.width, replacement.Texture.height);
+        }
+
+        Vector2 pivot = new Vector2(0.5f, 0.5f);
+        if (source.rect.width > 0f && source.rect.height > 0f)
+        {
+            pivot = new Vector2(source.pivot.x / source.rect.width, source.pivot.y / source.rect.height);
+        }
+
+        Sprite sprite = Sprite.Create(
+            replacement.Texture,
+            rect,
+            pivot,
+            source.pixelsPerUnit,
+            0,
+            SpriteMeshType.FullRect,
+            source.border);
+        sprite.name = replacement.Name;
+        replacement.SpriteCache[sourceId] = sprite;
+        return sprite;
+    }
+
+    private static IEnumerable<string> SplitAliases(string aliases)
+    {
+        return (aliases ?? string.Empty)
+            .Split(new[] { '|', ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(alias => alias.Trim())
+            .Where(alias => alias.Length > 0);
+    }
+
+    private static byte[]? ReadEmbeddedResourceBytes(string resourceName)
+    {
+        using Stream? stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName);
+        if (stream == null)
+        {
+            return null;
+        }
+
+        using MemoryStream memory = new MemoryStream();
+        stream.CopyTo(memory);
+        return memory.ToArray();
+    }
+
+    private static bool TryLoadPng(Texture2D texture, byte[] bytes)
+    {
+        if (LoadImageMethod == null)
+        {
+            return false;
+        }
+
+        object? result = LoadImageMethod.Invoke(null, new object[] { texture, bytes, false });
+        return result is bool loaded && loaded;
+    }
+
+    private void TryLoadExternalFont()
+    {
+        if (!_replaceFontWithExternalFile.Value || _externalFontAsset != null)
+        {
+            return;
+        }
+
+        if (TryLoadEmbeddedFont())
+        {
+            return;
+        }
+
+        string? fontPath = ResolveExternalFontPath(_externalFontPath.Value);
+        if (fontPath == null)
+        {
+            if (_logChanges.Value)
+            {
+                Logger.LogWarning($"External TMP font file was not found: {_externalFontPath.Value}");
+            }
+
+            return;
+        }
+
+        try
+        {
+            AssetBundle bundle = AssetBundle.LoadFromFile(fontPath);
+            if (bundle == null)
+            {
+                Logger.LogWarning($"External TMP font file is not a readable AssetBundle: {fontPath}");
+                return;
+            }
+
+            _loadedFontBundles.Add(bundle);
+            TryLoadFontFromBundle(bundle, fontPath);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning($"Failed to load external TMP font '{fontPath}': {ex.Message}");
+        }
+    }
+
+    private bool TryLoadEmbeddedFont()
+    {
+        if (_embeddedFontLoadAttempted)
+        {
+            return _externalFontAsset != null;
+        }
+
+        _embeddedFontLoadAttempted = true;
+        try
+        {
+            byte[]? bundleBytes = ReadEmbeddedResourceBytes(EmbeddedFontResourceName);
+            if (bundleBytes == null || bundleBytes.Length == 0)
+            {
+                Logger.LogWarning("Embedded TMP font AssetBundle was not found in patcher resources.");
+                return false;
+            }
+
+            AssetBundle bundle = AssetBundle.LoadFromMemory(bundleBytes);
+            if (bundle == null)
+            {
+                Logger.LogWarning("Embedded TMP font AssetBundle could not be loaded.");
+                return false;
+            }
+
+            _loadedFontBundles.Add(bundle);
+            if (!TryLoadFontFromBundle(bundle, "embedded patcher resource"))
+            {
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning($"Failed to load embedded TMP font AssetBundle: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static string? ResolveExternalFontPath(string configuredPath)
+    {
+        string path = (configuredPath ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        if (Path.IsPathRooted(path) && File.Exists(path))
+        {
+            return Path.GetFullPath(path);
+        }
+
+        string[] roots =
+        {
+            Paths.GameRootPath,
+            Paths.ConfigPath,
+            Path.Combine(Paths.ConfigPath, "TMPFonts"),
+            Path.Combine(Paths.ConfigPath, "ConfigTMP"),
+            Paths.PluginPath
+        };
+
+        foreach (string root in roots)
+        {
+            string candidate = Path.Combine(root, path);
+            if (File.Exists(candidate))
+            {
+                return Path.GetFullPath(candidate);
+            }
+        }
+
+        return null;
+    }
+
+    private Material GetExternalFontMaterial(Material originalMaterial)
+    {
+        if (_externalFontAsset?.material == null)
+        {
+            return originalMaterial;
+        }
+
+        if (originalMaterial.name.StartsWith(FontMaterialPrefix, StringComparison.Ordinal))
+        {
+            return originalMaterial;
+        }
+
+        int key = originalMaterial.GetInstanceID();
+        if (_fontReplacementMaterials.TryGetValue(key, out Material cachedMaterial))
+        {
+            return cachedMaterial;
+        }
+
+        Material material = new Material(_externalFontAsset.material)
+        {
+            name = $"{FontMaterialPrefix}{originalMaterial.name}"
+        };
+
+        CopyMaterialProperty(originalMaterial, material, "_FaceColor");
+        _fontReplacementMaterials[key] = material;
+        return material;
+    }
+
+    private static void CopyMaterialProperty(Material source, Material destination, string propertyName)
+    {
+        if (!source.HasProperty(propertyName) || !destination.HasProperty(propertyName))
+        {
+            return;
+        }
+
+        int propertyId = Shader.PropertyToID(propertyName);
+        if (propertyName.EndsWith("Color", StringComparison.Ordinal))
+        {
+            destination.SetColor(propertyId, source.GetColor(propertyId));
+            return;
+        }
+
+        destination.SetFloat(propertyId, source.GetFloat(propertyId));
+    }
+
+    private static bool IsReplacerTarget(TMP_Text text)
+    {
+        string path = GetHierarchyPath(text.transform);
+        string target = NormalizeHierarchyPath(ReplacerTargetPath);
+        return string.Equals(path, target, StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(target, StringComparison.OrdinalIgnoreCase);
     }
 
     private bool ShouldPatchTextComponent(Component component)
@@ -451,32 +785,7 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         }
 
         return component is TextMeshProUGUI ||
-            component is Text ||
             component.GetComponentInParent<Canvas>(includeInactive: true) != null;
-    }
-
-    private static IEnumerable<string> SplitTargets(string value)
-    {
-        return value.Split(new[] { '|', ',', ';', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(part => part.Trim())
-            .Where(part => part.Length > 0);
-    }
-
-    private static bool MatchesAnyTargetPath(Transform transform, string targets)
-    {
-        string path = GetHierarchyPath(transform);
-        foreach (string target in SplitTargets(targets))
-        {
-            string normalizedTarget = NormalizeHierarchyPath(target);
-            if (string.Equals(path, normalizedTarget, StringComparison.OrdinalIgnoreCase) ||
-                path.StartsWith(normalizedTarget + "/", StringComparison.OrdinalIgnoreCase) ||
-                path.EndsWith(normalizedTarget, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static string GetHierarchyPath(Transform transform)
@@ -662,6 +971,27 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         }
     }
 
+    private bool TryLoadFontFromBundle(AssetBundle bundle, string source)
+    {
+        string configuredAssetName = _assetBundleFontAssetName.Value.Trim();
+        TMP_FontAsset? fontAsset = null;
+        if (!string.IsNullOrWhiteSpace(configuredAssetName))
+        {
+            fontAsset = bundle.LoadAsset<TMP_FontAsset>(configuredAssetName);
+        }
+
+        fontAsset ??= bundle.LoadAllAssets<TMP_FontAsset>().FirstOrDefault();
+        if (fontAsset == null)
+        {
+            Logger.LogWarning($"No TMP_FontAsset found in AssetBundle: {source}");
+            return false;
+        }
+
+        _externalFontAsset = fontAsset;
+        Logger.LogInfo($"Loaded TMP font: {_externalFontAsset.name} from {source}");
+        return true;
+    }
+
     private static bool IsSafePostprocessorSource(string source)
     {
         if (source.Length < 3 || source.Any(ch => char.IsDigit(ch) || ch == '$'))
@@ -731,19 +1061,6 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         }
 
         return cjk > 0 && cjk >= letters;
-    }
-
-    private static bool ContainsCjk(string value)
-    {
-        foreach (char ch in value)
-        {
-            if (IsCjk(ch))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static bool IsCjk(char ch)

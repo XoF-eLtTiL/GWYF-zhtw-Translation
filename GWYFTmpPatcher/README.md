@@ -1,18 +1,16 @@
 # GWYF TMP Patcher
 
-This plugin combines the useful parts of the old TMP font and text replacer plugins.
+This BepInEx plugin patches the GWYF Traditional Chinese experience.
 
-It does not load external fonts. Its font-side job is only to correct overly thick outlines on the game's original TMP materials.
+Included behavior:
 
-It also applies XUnity translation files to text objects missed by XUnity hooks:
+- replaces TMP fonts with the embedded `notosanstc-medium sdf` TMP font AssetBundle
+- applies XUnity translation files to the known missed TMP item-name target
+- replaces selected logo textures with the embedded `GWYFTW_LOGO.png`
 
-- `BepInEx/Translation/zh-TW/Text/Complate.txt`
-- `BepInEx/Translation/zh-TW/Text/_Postprocessors.txt`
+Embedded assets:
 
-Default behavior:
+- `Assets/notosanstc-medium sdf`
+- `Assets/GWYFTW_LOGO.png`
 
-- Fix TMP outline width to `0.018`
-- Only adjust TMP objects whose text contains CJK characters
-- Apply `FaceDilate = -0.03` to make overly heavy glyphs slightly thinner
-- Translate missed `TMP_Text` objects only
-- Do not scan legacy `UnityEngine.UI.Text` / `TextMesh` unless enabled in config
+The patcher does not download or execute assets. The embedded font AssetBundle is loaded from DLL memory, and the embedded PNG is decoded as a texture.
