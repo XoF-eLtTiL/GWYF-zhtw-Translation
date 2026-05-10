@@ -38,6 +38,8 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
     private ConfigEntry<bool> _replaceFontMaterials = null!;
     private ConfigEntry<bool> _replaceBuiltInTextures = null!;
     private ConfigEntry<string> _logoTextureAliases = null!;
+    private ConfigEntry<string> _logoFallbackKeywords = null!;
+    private ConfigEntry<string> _logoFallbackExcludeKeywords = null!;
     private ConfigEntry<int> _textureBatchSize = null!;
 
     private const string FontMaterialPrefix = "GWYF TMP Font ";
@@ -49,6 +51,7 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
     private readonly HashSet<int> _fontPatchedTextIds = new HashSet<int>();
     private readonly List<AssetBundle> _loadedFontBundles = new List<AssetBundle>();
     private readonly Dictionary<string, TextureReplacement> _textureReplacements = new Dictionary<string, TextureReplacement>(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _loggedTextureFallbackMatches = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _exactRules = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _postRules = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     private readonly List<RegexRule> _regexRules = new List<RegexRule>();
@@ -76,7 +79,9 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         _assetBundleFontAssetName = Config.Bind("Font", "AssetBundleFontAssetName", "", "TMP_FontAsset name inside the AssetBundle. Leave blank to use the first TMP_FontAsset.");
         _replaceFontMaterials = Config.Bind("Font", "ReplaceFontMaterials", true, "Use the external font material when replacing TMP font assets.");
         _replaceBuiltInTextures = Config.Bind("Texture", "ReplaceBuiltInTextures", true, "Replace selected game textures from resources embedded in this patcher.");
-        _logoTextureAliases = Config.Bind("Texture", "LogoTextureAliases", "tenstack_logo_grayscale_ten|tenstack_logo_grayscale_stack|GWYFTW_LOGO", "Texture or sprite names that should use the embedded zh-TW logo.");
+        _logoTextureAliases = Config.Bind("Texture", "LogoTextureAliases", "GWYFTW_LOGO", "Texture or sprite names that should use the embedded zh-TW logo.");
+        _logoFallbackKeywords = Config.Bind("Texture", "LogoFallbackKeywords", "logo|title|gwyf|gamble|friends", "If no exact alias matches, texture or sprite names containing these keywords use the embedded zh-TW logo.");
+        _logoFallbackExcludeKeywords = Config.Bind("Texture", "LogoFallbackExcludeKeywords", "tenstack_logo_grayscale", "Keyword matches containing these values are skipped so XUnity can own those textures.");
         _textureBatchSize = Config.Bind("Performance", "TextureBatchSize", 64, "How many texture related objects to inspect per frame during texture replacement scans.");
 
         _translationTextDirectory = Path.Combine(Paths.GameRootPath, "BepInEx", "Translation", "zh-TW", "Text");
@@ -443,7 +448,8 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
 
     private bool PatchLoadedTextureObject(Texture2D texture)
     {
-        if (!_textureReplacements.TryGetValue(texture.name, out TextureReplacement replacement))
+        TextureReplacement? replacement = FindReplacementForTextureName(texture.name);
+        if (replacement == null)
         {
             return false;
         }
@@ -518,8 +524,8 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
                 continue;
             }
 
-            if (_textureReplacements.TryGetValue(material.mainTexture.name, out TextureReplacement replacement) &&
-                !ReferenceEquals(material.mainTexture, replacement.Texture))
+            TextureReplacement? replacement = FindReplacementForTextureName(material.mainTexture.name);
+            if (replacement != null && !ReferenceEquals(material.mainTexture, replacement.Texture))
             {
                 material.mainTexture = replacement.Texture;
                 patched++;
@@ -542,7 +548,69 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
             return replacement;
         }
 
+        TextureReplacement? fallback = FindReplacementForTextureName(sprite.name);
+        if (fallback != null)
+        {
+            return fallback;
+        }
+
+        if (texture != null)
+        {
+            fallback = FindReplacementForTextureName(texture.name);
+            if (fallback != null)
+            {
+                return fallback;
+            }
+        }
+
         return null;
+    }
+
+    private TextureReplacement? FindReplacementForTextureName(string objectName)
+    {
+        if (string.IsNullOrWhiteSpace(objectName))
+        {
+            return null;
+        }
+
+        if (_textureReplacements.TryGetValue(objectName, out TextureReplacement exact))
+        {
+            return exact;
+        }
+
+        TextureReplacement? fallback = _textureReplacements.Values.FirstOrDefault();
+        if (fallback == null || !IsLogoFallbackName(objectName))
+        {
+            return null;
+        }
+
+        if (_logChanges.Value && _loggedTextureFallbackMatches.Add(objectName))
+        {
+            Logger.LogInfo($"Texture fallback matched '{objectName}' -> {fallback.Name}");
+        }
+
+        return fallback;
+    }
+
+    private bool IsLogoFallbackName(string objectName)
+    {
+        foreach (string exclude in SplitAliases(_logoFallbackExcludeKeywords.Value))
+        {
+            if (objectName.IndexOf(exclude, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return false;
+            }
+        }
+
+        foreach (string keyword in SplitAliases(_logoFallbackKeywords.Value))
+        {
+            if (objectName.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static Sprite GetReplacementSprite(TextureReplacement replacement, Sprite source)
