@@ -15,7 +15,7 @@ using UnityEngine.UI;
 
 namespace GWYFTmpPatcher;
 
-[BepInPlugin("codex.gwyf.tmppatcher", "GWYF TMP Patcher", "0.1.12")]
+[BepInPlugin("codex.gwyf.tmppatcher", "GWYF TMP Patcher", "0.1.14")]
 public sealed class TmpPatcherPlugin : BaseUnityPlugin
 {
     private sealed class TextureReplacement
@@ -36,16 +36,42 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
     private ConfigEntry<string> _externalFontPath = null!;
     private ConfigEntry<string> _assetBundleFontAssetName = null!;
     private ConfigEntry<bool> _replaceBuiltInTextures = null!;
-    private ConfigEntry<string> _logoTextureAliases = null!;
     private ConfigEntry<int> _textureBatchSize = null!;
 
-    private const string FontMaterialPrefix = "GWYF TMP Font ";
+    private const string TargetTmpFontName = "ChineseFont";
+    private const string LogoTextureName = "GWYF_LOGO_1280x720";
     private const string ReplacerTargetPath = "/LocalManager/UI/InteractionUIPanel/TextPanel/ItemNameText";
     private const string EmbeddedFontResourceName = "GWYFTmpPatcher.Assets.notosanstc-medium-sdf.bundle";
     private const string EmbeddedLogoResourceName = "GWYFTmpPatcher.Assets.GWYFTW_LOGO.png";
+    private static readonly string[] TmpFontAssetCopyFields =
+    {
+        "m_Version",
+        "m_FaceInfo",
+        "m_GlyphTable",
+        "m_CharacterTable",
+        "m_AtlasTexture",
+        "m_AtlasTextures",
+        "m_AtlasTextureIndex",
+        "m_UsedGlyphRects",
+        "m_FreeGlyphRects",
+        "m_GlyphIndexList",
+        "m_GlyphIndexListNewlyAdded",
+        "m_GlyphsToRender",
+        "m_GlyphsRendered",
+        "m_AtlasWidth",
+        "m_AtlasHeight",
+        "m_AtlasPadding",
+        "m_AtlasRenderMode",
+        "m_AtlasPopulationMode",
+        "m_FontFeatureTable",
+        "m_fontInfo",
+        "m_glyphInfoList",
+        "m_KerningTable",
+        "m_kerningInfo",
+        "fallbackFontAssets"
+    };
 
-    private readonly Dictionary<int, Material> _fontReplacementMaterials = new Dictionary<int, Material>();
-    private readonly HashSet<int> _fontPatchedTextIds = new HashSet<int>();
+    private readonly HashSet<int> _patchedFontAssetIds = new HashSet<int>();
     private readonly List<AssetBundle> _loadedFontBundles = new List<AssetBundle>();
     private readonly Dictionary<string, TextureReplacement> _textureReplacements = new Dictionary<string, TextureReplacement>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _exactRules = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -70,11 +96,10 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         _forceMeshUpdate = Config.Bind("General", "ForceMeshUpdate", false, "Force TMP meshes to redraw after text replacement.");
         _logChanges = Config.Bind("Diagnostics", "LogChanges", true, "Log applied font and translation changes.");
         _fontBatchSize = Config.Bind("Performance", "FontBatchSize", 32, "How many TMP objects to font patch per frame during scene scans.");
-        _replaceFontWithExternalFile = Config.Bind("Font", "ReplaceFontWithExternalFile", true, "Replace TMP font assets while preserving the original TMP material appearance.");
+        _replaceFontWithExternalFile = Config.Bind("Font", "ReplaceFontWithExternalFile", true, "Patch only the game's ChineseFont TMP font asset.");
         _externalFontPath = Config.Bind("Font", "ExternalFontPath", "notosanstc-medium sdf", "External TMP font AssetBundle path. Relative paths are searched from the game root and BepInEx/config.");
         _assetBundleFontAssetName = Config.Bind("Font", "AssetBundleFontAssetName", "", "TMP_FontAsset name inside the AssetBundle. Leave blank to use the first TMP_FontAsset.");
         _replaceBuiltInTextures = Config.Bind("Texture", "ReplaceBuiltInTextures", true, "Replace selected game textures from resources embedded in this patcher.");
-        _logoTextureAliases = Config.Bind("Texture", "LogoTextureAliases", "GWYF_LOGO_1280x720", "Texture or sprite names that should use the embedded zh-TW logo.");
         _textureBatchSize = Config.Bind("Performance", "TextureBatchSize", 64, "How many texture related objects to inspect per frame during texture replacement scans.");
 
         _translationTextDirectory = Path.Combine(Paths.GameRootPath, "BepInEx", "Translation", "zh-TW", "Text");
@@ -162,6 +187,20 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         int translated = 0;
         int processedThisFrame = 0;
         int batchSize = Mathf.Max(1, _fontBatchSize.Value);
+
+        foreach (TMP_FontAsset fontAsset in Resources.FindObjectsOfTypeAll<TMP_FontAsset>())
+        {
+            if (fontAsset != null && PatchChineseFontAsset(fontAsset))
+            {
+                fontPatched++;
+            }
+
+            if (++processedThisFrame >= batchSize)
+            {
+                processedThisFrame = 0;
+                yield return null;
+            }
+        }
 
         foreach (TMP_Text text in texts)
         {
@@ -300,7 +339,7 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         if (allowFont && _replaceFontWithExternalFile.Value)
         {
             TryLoadExternalFont();
-            if (PatchTextMaterials(text))
+            if (PatchChineseFontAsset(text.font))
             {
                 changed = true;
                 fontChanged = true;
@@ -310,70 +349,29 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         return changed;
     }
 
-    private bool PatchTextMaterials(TMP_Text text)
+    private bool PatchChineseFontAsset(TMP_FontAsset? targetFont)
     {
-        bool replaceFont = _replaceFontWithExternalFile.Value && _externalFontAsset != null;
-        if (!replaceFont)
+        TMP_FontAsset? replacementFont = _externalFontAsset;
+        if (!_replaceFontWithExternalFile.Value || replacementFont == null)
         {
             return false;
         }
 
-        int textId = text.GetInstanceID();
-        if (_fontPatchedTextIds.Contains(textId) && ReferenceEquals(text.font, _externalFontAsset))
+        if (targetFont == null || !IsTargetTmpFontAsset(targetFont) || ReferenceEquals(targetFont, replacementFont))
         {
             return false;
         }
 
-        bool changed = false;
-        if (!ReferenceEquals(text.font, _externalFontAsset))
+        TMP_FontAsset fontToPatch = targetFont;
+        int fontId = fontToPatch.GetInstanceID();
+        if (_patchedFontAssetIds.Contains(fontId))
         {
-            text.font = _externalFontAsset;
-            changed = true;
+            return false;
         }
 
-        if (text.fontSharedMaterial != null)
-        {
-            Material material = GetExternalFontMaterial(text.fontSharedMaterial);
-            if (!ReferenceEquals(text.fontSharedMaterial, material))
-            {
-                text.fontSharedMaterial = material;
-                changed = true;
-            }
-        }
-
-        Material[] sharedMaterials = text.fontSharedMaterials;
-        if (sharedMaterials != null && sharedMaterials.Length > 0)
-        {
-            bool arrayChanged = false;
-            for (int i = 0; i < sharedMaterials.Length; i++)
-            {
-                Material original = sharedMaterials[i];
-                if (original == null)
-                {
-                    continue;
-                }
-
-                Material patched = GetExternalFontMaterial(original);
-                if (!ReferenceEquals(original, patched))
-                {
-                    sharedMaterials[i] = patched;
-                    arrayChanged = true;
-                }
-            }
-
-            if (arrayChanged)
-            {
-                text.fontSharedMaterials = sharedMaterials;
-                changed = true;
-            }
-        }
-
-        if (changed)
-        {
-            _fontPatchedTextIds.Add(textId);
-        }
-
-        return changed;
+        PatchTmpFontAssetInPlace(fontToPatch, replacementFont);
+        _patchedFontAssetIds.Add(fontId);
+        return true;
     }
 
     private void LogPatchSummary(string reason, int fontPatched, int translated)
@@ -412,20 +410,17 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
             return false;
         }
 
-        logo.name = "GWYF_LOGO_1280x720";
+        logo.name = LogoTextureName;
         logo.wrapMode = TextureWrapMode.Clamp;
         logo.filterMode = FilterMode.Bilinear;
 
         TextureReplacement replacement = new TextureReplacement
         {
-            Name = "GWYF_LOGO_1280x720",
+            Name = LogoTextureName,
             Texture = logo
         };
 
-        foreach (string alias in SplitAliases(_logoTextureAliases.Value))
-        {
-            _textureReplacements[alias] = replacement;
-        }
+        _textureReplacements[LogoTextureName] = replacement;
 
         if (_logChanges.Value)
         {
@@ -751,72 +746,69 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         return null;
     }
 
-    private Material GetExternalFontMaterial(Material originalMaterial)
+    private static bool IsTargetTmpFontAsset(TMP_FontAsset? fontAsset)
     {
-        if (_externalFontAsset?.material == null)
-        {
-            return originalMaterial;
-        }
-
-        if (originalMaterial.name.StartsWith(FontMaterialPrefix, StringComparison.Ordinal))
-        {
-            return originalMaterial;
-        }
-
-        int key = originalMaterial.GetInstanceID();
-        if (_fontReplacementMaterials.TryGetValue(key, out Material cachedMaterial))
-        {
-            return cachedMaterial;
-        }
-
-        Material material = new Material(originalMaterial)
-        {
-            name = $"{FontMaterialPrefix}{originalMaterial.name}"
-        };
-
-        ApplyExternalFontAtlas(material, _externalFontAsset.material);
-        _fontReplacementMaterials[key] = material;
-        return material;
+        return fontAsset != null &&
+            string.Equals(NormalizeUnityObjectName(fontAsset.name), TargetTmpFontName, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void ApplyExternalFontAtlas(Material destination, Material fontMaterial)
+    private void PatchTmpFontAssetInPlace(TMP_FontAsset targetFont, TMP_FontAsset sourceFont)
     {
-        CopyMaterialTexture(fontMaterial, destination, "_MainTex");
-        CopyMaterialProperty(fontMaterial, destination, "_GradientScale");
-        CopyMaterialProperty(fontMaterial, destination, "_TextureWidth");
-        CopyMaterialProperty(fontMaterial, destination, "_TextureHeight");
-        CopyMaterialProperty(fontMaterial, destination, "_ScaleX");
-        CopyMaterialProperty(fontMaterial, destination, "_ScaleY");
-        CopyMaterialProperty(fontMaterial, destination, "_PerspectiveFilter");
-        CopyMaterialProperty(fontMaterial, destination, "_Sharpness");
+        Material? targetMaterial = targetFont.material;
+        Material? sourceMaterial = sourceFont.material;
+
+        foreach (string fieldName in TmpFontAssetCopyFields)
+        {
+            CopyFieldValue(sourceFont, targetFont, fieldName);
+        }
+
+        if (targetMaterial != null && sourceMaterial != null)
+        {
+            string materialName = targetMaterial.name;
+            targetMaterial.CopyPropertiesFromMaterial(sourceMaterial);
+            targetMaterial.name = materialName;
+            CopyFieldValue(sourceFont, targetFont, "m_Material", targetMaterial);
+        }
+        else if (sourceMaterial != null)
+        {
+            CopyFieldValue(sourceFont, targetFont, "m_Material");
+        }
+
+        RefreshTmpFontAsset(targetFont);
+        if (_logChanges.Value)
+        {
+            Logger.LogInfo($"Patched TMP font asset '{TargetTmpFontName}' with '{sourceFont.name}'.");
+        }
     }
 
-    private static void CopyMaterialProperty(Material source, Material destination, string propertyName)
+    private static void CopyFieldValue(TMP_FontAsset source, TMP_FontAsset target, string fieldName)
     {
-        if (!source.HasProperty(propertyName) || !destination.HasProperty(propertyName))
+        FieldInfo? field = typeof(TMP_FontAsset).GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (field == null)
         {
             return;
         }
 
-        int propertyId = Shader.PropertyToID(propertyName);
-        if (propertyName.EndsWith("Color", StringComparison.Ordinal))
-        {
-            destination.SetColor(propertyId, source.GetColor(propertyId));
-            return;
-        }
-
-        destination.SetFloat(propertyId, source.GetFloat(propertyId));
+        field.SetValue(target, field.GetValue(source));
     }
 
-    private static void CopyMaterialTexture(Material source, Material destination, string propertyName)
+    private static void CopyFieldValue(TMP_FontAsset source, TMP_FontAsset target, string fieldName, object value)
     {
-        if (!source.HasProperty(propertyName) || !destination.HasProperty(propertyName))
+        FieldInfo? field = typeof(TMP_FontAsset).GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        field?.SetValue(target, value);
+    }
+
+    private static void RefreshTmpFontAsset(TMP_FontAsset fontAsset)
+    {
+        MethodInfo? readDefinition = typeof(TMP_FontAsset).GetMethod("ReadFontAssetDefinition", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (readDefinition != null)
         {
+            readDefinition.Invoke(fontAsset, null);
             return;
         }
 
-        int propertyId = Shader.PropertyToID(propertyName);
-        destination.SetTexture(propertyId, source.GetTexture(propertyId));
+        MethodInfo? initializeLookup = typeof(TMP_FontAsset).GetMethod("InitializeDictionaryLookupTables", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        initializeLookup?.Invoke(fontAsset, null);
     }
 
     private static bool IsReplacerTarget(TMP_Text text)
@@ -1026,15 +1018,38 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         string configuredAssetName = _assetBundleFontAssetName.Value.Trim();
         TMP_FontAsset? fontAsset = null;
         if (!string.IsNullOrWhiteSpace(configuredAssetName))
-        {
             fontAsset = bundle.LoadAsset<TMP_FontAsset>(configuredAssetName);
-        }
 
         fontAsset ??= bundle.LoadAllAssets<TMP_FontAsset>().FirstOrDefault();
         if (fontAsset == null)
         {
             Logger.LogWarning($"No TMP_FontAsset found in AssetBundle: {source}");
             return false;
+        }
+
+        Texture2D? atlas = bundle.LoadAllAssets<Texture2D>().FirstOrDefault();
+        if (atlas != null)
+        {
+            FieldInfo? atlasField = typeof(TMP_FontAsset)
+                .GetField("m_AtlasTexture", BindingFlags.NonPublic | BindingFlags.Instance);
+            atlasField?.SetValue(fontAsset, atlas);
+
+            FieldInfo? atlasesField = typeof(TMP_FontAsset)
+                .GetField("m_AtlasTextures", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (atlasesField?.GetValue(fontAsset) is Texture2D[] existing && existing.Length > 0)
+                existing[0] = atlas;
+            else
+                atlasesField?.SetValue(fontAsset, new[] { atlas });
+
+            if (fontAsset.material != null)
+                fontAsset.material.SetTexture(ShaderUtilities.ID_MainTex, atlas);
+
+            if (_logChanges.Value)
+                Logger.LogInfo($"Bound atlas texture: {atlas.name} ({atlas.width}x{atlas.height})");
+        }
+        else
+        {
+            Logger.LogWarning($"No Texture2D found in AssetBundle: {source}; glyphs may render incorrectly.");
         }
 
         _externalFontAsset = fontAsset;

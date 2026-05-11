@@ -4,9 +4,9 @@ This BepInEx plugin patches the GWYF Traditional Chinese experience.
 
 Included behavior:
 
-- replaces TMP fonts with the embedded `notosanstc-medium sdf` TMP font AssetBundle
+- replaces only the game's `ChineseFont` TMP font with the embedded `notosanstc-medium sdf` TMP font AssetBundle
 - applies XUnity translation files to the known missed TMP item-name target
-- replaces selected logo textures with the embedded `GWYFTW_LOGO.png`
+- replaces the built-in `GWYF_LOGO_1280x720` logo texture with the embedded `GWYFTW_LOGO.png`
 
 Embedded assets:
 
