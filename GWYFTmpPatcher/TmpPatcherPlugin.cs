@@ -15,7 +15,7 @@ using UnityEngine.UI;
 
 namespace GWYFTmpPatcher;
 
-[BepInPlugin("codex.gwyf.tmppatcher", "GWYF TMP Patcher", "0.1.14")]
+[BepInPlugin("codex.gwyf.tmppatcher", "GWYF TMP Patcher", "0.1.15")]
 public sealed class TmpPatcherPlugin : BaseUnityPlugin
 {
     private sealed class TextureReplacement
@@ -40,6 +40,7 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
 
     private const string TargetTmpFontName = "ChineseFont";
     private const string LogoTextureName = "GWYF_LOGO_1280x720";
+    private const string MainTexPropertyName = "_MainTex";
     private const string ReplacerTargetPath = "/LocalManager/UI/InteractionUIPanel/TextPanel/ItemNameText";
     private const string EmbeddedFontResourceName = "GWYFTmpPatcher.Assets.notosanstc-medium-sdf.bundle";
     private const string EmbeddedLogoResourceName = "GWYFTmpPatcher.Assets.GWYFTW_LOGO.png";
@@ -502,13 +503,19 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         int patched = 0;
         foreach (Material material in renderer.sharedMaterials ?? Array.Empty<Material>())
         {
-            if (material == null || material.mainTexture == null)
+            if (material == null || !HasMainTextureProperty(material))
             {
                 continue;
             }
 
-            if (TryGetTextureReplacement(material.mainTexture.name, out TextureReplacement replacement) &&
-                !ReferenceEquals(material.mainTexture, replacement.Texture))
+            Texture? currentTexture = material.mainTexture;
+            if (currentTexture == null)
+            {
+                continue;
+            }
+
+            if (TryGetTextureReplacement(currentTexture.name, out TextureReplacement replacement) &&
+                !ReferenceEquals(currentTexture, replacement.Texture))
             {
                 material.mainTexture = replacement.Texture;
                 patched++;
@@ -532,6 +539,11 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         }
 
         return null;
+    }
+
+    private static bool HasMainTextureProperty(Material material)
+    {
+        return material.HasProperty(MainTexPropertyName);
     }
 
     private bool TryGetTextureReplacement(string objectName, out TextureReplacement replacement)
@@ -1041,7 +1053,7 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
             else
                 atlasesField?.SetValue(fontAsset, new[] { atlas });
 
-            if (fontAsset.material != null)
+            if (fontAsset.material != null && HasMainTextureProperty(fontAsset.material))
                 fontAsset.material.SetTexture(ShaderUtilities.ID_MainTex, atlas);
 
             if (_logChanges.Value)
