@@ -37,6 +37,7 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
     private ConfigEntry<string> _assetBundleFontAssetName = null!;
     private ConfigEntry<bool> _replaceBuiltInTextures = null!;
     private ConfigEntry<int> _textureBatchSize = null!;
+    private ConfigEntry<string> _translationTextPath = null!;
 
     private const string TargetTmpFontName = "ChineseFont";
     private const string LogoTextureName = "GWYF_LOGO_1280x720";
@@ -102,8 +103,9 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         _assetBundleFontAssetName = Config.Bind("Font", "AssetBundleFontAssetName", "", "TMP_FontAsset name inside the AssetBundle. Leave blank to use the first TMP_FontAsset.");
         _replaceBuiltInTextures = Config.Bind("Texture", "ReplaceBuiltInTextures", true, "Replace selected game textures from resources embedded in this patcher.");
         _textureBatchSize = Config.Bind("Performance", "TextureBatchSize", 64, "How many texture related objects to inspect per frame during texture replacement scans.");
+        _translationTextPath = Config.Bind("Paths", "TranslationTextPath", "Translation\\zh-TW\\Text", "Translation text directory relative to BepInEx. Use config\\Translation\\zh-TW\\Text for Thunderstore profiles.");
 
-        _translationTextDirectory = Path.Combine(Paths.GameRootPath, "BepInEx", "Translation", "zh-TW", "Text");
+        _translationTextDirectory = ResolveBepInExRelativePath(_translationTextPath.Value);
         ReloadTranslationsIfNeeded(force: true);
         TryLoadExternalFont();
         LoadEmbeddedTextureReplacements();
@@ -756,6 +758,34 @@ public sealed class TmpPatcherPlugin : BaseUnityPlugin
         }
 
         return null;
+    }
+
+    private static string ResolveBepInExRelativePath(string configuredPath)
+    {
+        string path = (configuredPath ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            path = "Translation";
+        }
+
+        if (Path.IsPathRooted(path))
+        {
+            return Path.GetFullPath(path);
+        }
+
+        string normalized = path.Replace('\\', '/');
+        if (normalized.Equals("config", StringComparison.OrdinalIgnoreCase))
+        {
+            return Paths.ConfigPath;
+        }
+
+        if (normalized.StartsWith("config/", StringComparison.OrdinalIgnoreCase))
+        {
+            string underConfig = normalized.Substring("config/".Length).Replace('/', Path.DirectorySeparatorChar);
+            return Path.GetFullPath(Path.Combine(Paths.ConfigPath, underConfig));
+        }
+
+        return Path.GetFullPath(Path.Combine(Paths.GameRootPath, "BepInEx", normalized.Replace('/', Path.DirectorySeparatorChar)));
     }
 
     private static bool IsTargetTmpFontAsset(TMP_FontAsset? fontAsset)

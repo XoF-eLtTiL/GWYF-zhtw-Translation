@@ -5,6 +5,8 @@ GWYFTmpPatcher/obj/
 GWYFTextureRuntime/bin/
 GWYFTextureRuntime/obj/
 release-pack/
+thunderstore-package/
+releases/*-Thunderstore.zip
 
 # Local maintainer tooling. Keep these on the maintainer machine only.
 scripts/

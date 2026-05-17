@@ -24,7 +24,7 @@ The updater only downloads files listed in `manifest.txt` when they match all of
 - path is relative and does not contain `..`
 - sha256 in the manifest matches the downloaded bytes
 
-Downloaded files are only written to `BepInEx/Translation`. The updater never loads or executes downloaded content.
+Downloaded files are only written to the configured BepInEx translation root. The default is `BepInEx/Translation`; Thunderstore profiles use `BepInEx/config/Translation`. The updater never loads or executes downloaded content.
 
 ## Manual commands
 
