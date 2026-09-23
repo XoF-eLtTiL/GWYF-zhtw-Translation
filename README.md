@@ -28,8 +28,8 @@
 如果你是玩家，這個 repo 可以讓你：
 
 - 安裝 `Gamble With Your Friends` 的繁體中文翻譯
-- 下載包含 `BepInEx + XUnity + 翻譯文本 + 自動更新翻譯模組` 的公開模組包
-- 透過 updater 在遊戲啟動時自動同步最新翻譯
+- 下載包含 `BepInEx + XUnity + 翻譯文本` 的手動整合包
+- 透過 Thunderstore 版本內的 updater 在遊戲啟動時同步最新翻譯
 
 如果你是協作者，這個 repo 可以讓你：
 
@@ -44,6 +44,8 @@
 - Translation base:
   - `https://raw.githubusercontent.com/XoF-eLtTiL/GWYF-zhtw-Translation/main/translations`
 ## 遊戲端 updater
+
+Updater 僅包含在 Thunderstore 發布版；手動整合包與維護者本機安裝不包含 updater。
 
 遊戲端 updater 會在 `Gamble With Your Friends` 啟動時自動檢查這個 repo 的：
 
